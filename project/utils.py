@@ -30,6 +30,7 @@ def pdf_to_markdown(pdf_path, output_dir):
     Path(output_path).with_suffix(".md").write_bytes(md_cleaned.encode('utf-8'))
 
 def pdfs_to_markdowns(path_pattern, overwrite: bool = False):
+    """将pdf文件转换为markdown文件"""
     output_dir = Path(config.MARKDOWN_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -39,6 +40,7 @@ def pdfs_to_markdowns(path_pattern, overwrite: bool = False):
             pdf_to_markdown(pdf_path, output_dir)
 
 def estimate_context_tokens(messages: list) -> int:
+    """计算token数"""
     try:
         encoding = tiktoken.encoding_for_model("gpt-4")
     except:

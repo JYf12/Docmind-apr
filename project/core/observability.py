@@ -5,6 +5,10 @@ logger = logging.getLogger(__name__)
 
 
 class Observability:
+    """
+    Observability class for Langfuse.
+    langfuse的监视类实现
+    """
 
     def __init__(self):
         self._enabled = config.LANGFUSE_ENABLED

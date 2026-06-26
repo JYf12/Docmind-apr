@@ -12,7 +12,7 @@ class ParentStoreManager:
         self.__store_path = Path(store_path) 
         self.__store_path.mkdir(parents=True, exist_ok=True)
 
-    def save(self, parent_id: str, content: str, metadata: Dict) -> None:
+    def save(self, parent_id: str, content: str, metadata: Dict) -> None:           # 保存父块及其元数据到json文件中
         file_path = self.__store_path / f"{parent_id}.json"
         file_path.write_text(
             json.dumps({"page_content": content,"metadata": metadata}, ensure_ascii=False, indent=2),
@@ -23,7 +23,7 @@ class ParentStoreManager:
         for parent_id, doc in parents:
             self.save(parent_id, doc.page_content, doc.metadata)
 
-    def load(self, parent_id: str) -> Dict:
+    def load(self, parent_id: str) -> Dict:                                         # 加载父块及其元数据（通过json加载）
         file_path = self.__store_path / (
             parent_id if parent_id.lower().endswith(".json") else f"{parent_id}.json"
         )

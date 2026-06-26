@@ -14,6 +14,9 @@ def create_gradio_ui():
     chat_interface = ChatInterface(rag_system)
     
     def format_file_list():
+        '''
+        获取知识库中的所有 Markdown 文件列表
+        '''
         files = doc_manager.get_markdown_files()
         if not files:
             return "📭 No documents available in the knowledge base"
@@ -23,15 +26,16 @@ def create_gradio_ui():
         if not files:
             return None, format_file_list()
             
-        added, skipped = doc_manager.add_documents(
+        added, skipped = doc_manager.add_documents(                         # 分块+存储
             files, 
-            progress_callback=lambda p, desc: progress(p, desc=desc)
+            progress_callback=lambda p, desc: progress(p, desc=desc)        # 进度回调
         )
         
         gr.Info(f"✅ Added: {added} | Skipped: {skipped}")
         return None, format_file_list()
     
     def clear_handler():
+        """删除所有.md文件-删除父块存储json文件-删除子块向量存储集合"""
         doc_manager.clear_all()
         gr.Info(f"🗑️ Removed all documents")
         return format_file_list()
@@ -63,7 +67,7 @@ def create_gradio_ui():
             file_list = gr.Textbox(
                 value=format_file_list(),
                 interactive=False,
-                lines = 7,
+                lines=7,
                 max_lines=10,
                 elem_id="file-list-box",
                 show_label=False
@@ -73,7 +77,7 @@ def create_gradio_ui():
                 refresh_btn = gr.Button("Refresh", size="md")
                 clear_btn = gr.Button("Clear All", variant="stop", size="md")
             
-            add_btn.click(upload_handler, [files_input], [files_input, file_list], show_progress="corner")
+            add_btn.click(upload_handler, [files_input], [files_input, file_list], show_progress="corner")          # 上传文件分块处理
             refresh_btn.click(format_file_list, None, file_list)
             clear_btn.click(clear_handler, None, file_list)
         

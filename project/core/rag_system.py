@@ -21,10 +21,48 @@ class RAGSystem:
         self.recursion_limit = config.GRAPH_RECURSION_LIMIT
 
     def initialize(self):
-        self.vector_db.create_collection(self.collection_name)
+        self.vector_db.create_collection(self.collection_name)          # 1.创建向量数据库
         collection = self.vector_db.get_collection(self.collection_name)
 
-        llm = ChatOllama(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE)
+        # llm = ChatOllama(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE)
+        # Load active configuration
+        active_config = config.LLM_CONFIGS[config.ACTIVE_LLM_CONFIG]
+        model = active_config["model"]
+        temperature = active_config["temperature"]
+
+        if config.ACTIVE_LLM_CONFIG == "ollama":
+            # from langchain_ollama import ChatOllama
+            # llm = ChatOllama(model=model, temperature=temperature, base_url=active_config["url"])
+
+            # 使用 LangChain 的 ChatOpenAI 包装，自动集成 Langfuse 追踪
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                api_key="ollama",
+                base_url=active_config.get("url", "http://localhost:11434") + "/v1",
+            )
+
+
+        elif config.ACTIVE_LLM_CONFIG == "openai":
+            from langchain_openai import ChatOpenAI
+            llm = ChatOpenAI(
+                model=model,
+                temperature=temperature,
+                api_key=config.LLM_API_KEY,
+                base_url=config.LLM_API_URL,
+            )
+
+        # elif config.ACTIVE_LLM_CONFIG == "anthropic":
+        #     from langchain_anthropic import ChatAnthropic
+        #     llm = ChatAnthropic(model=model, temperature=temperature)
+        #
+        # elif config.ACTIVE_LLM_CONFIG == "google":
+        #     from langchain_google_genai import ChatGoogleGenerativeAI
+        #     llm = ChatGoogleGenerativeAI(model=model, temperature=temperature)
+
+        else:
+            raise ValueError(f"Unsupported LLM provider: {config.ACTIVE_LLM_CONFIG}")
         tools = ToolFactory(collection).create_tools()
         self.agent_graph = create_agent_graph(llm, tools)
 

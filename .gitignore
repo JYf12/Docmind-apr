@@ -8,3 +8,11 @@ __pycache__/
 .env
 .venv/
 venv/
+notebooks/
+dataset/
+README-original.md
+project/README.md
+project/evaluate_rag.py
+project/evaluate_rag_ex.py
+project/evalDir
+project/cache

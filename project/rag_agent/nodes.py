@@ -3,11 +3,18 @@ from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, 
 from langgraph.types import Command
 from .graph_state import State, AgentState
 from .schemas import QueryAnalysis
-from .prompts import *
+from .prompts_cn import *
+# from .prompts_en import *
 from utils import estimate_context_tokens
 from config import BASE_TOKEN_THRESHOLD, TOKEN_GROWTH_FACTOR
 
 def summarize_history(state: State, llm):
+    """总结历史会话[当历史会话记录大于等于4时触发]
+    keys:
+        --只筛选人类和助手的对话消息
+        --只对筛选后的消息取最近6条-----[保持系统的效率和经济性]
+        --将最相关的6条人类与AI助手的对话送给llm进行摘要总结
+    """
     if len(state["messages"]) < 4:
         return {"conversation_summary": ""}
     
@@ -25,25 +32,38 @@ def summarize_history(state: State, llm):
         conversation += f"{role}: {msg.content}\n"
 
     summary_response = llm.with_config(temperature=0.2).invoke([SystemMessage(content=get_conversation_summary_prompt()), HumanMessage(content=conversation)])
-    return {"conversation_summary": summary_response.content, "agent_answers": [{"__reset__": True}]}
+    return {"conversation_summary": summary_response.content, "agent_answers": [{"__reset__": True}]}       # {"__reset__": True}--> 清空助手的消息记录
 
 def rewrite_query(state: State, llm):
+    """
+    查询重写
+    output:
+        --问题不明确
+        --一个或多个[最多三个]重写的、独立的、适用于文档检索的查询
+    keys:
+        查询澄清会删除除系统消息外的所有信息，但不会完全丢失上下文，因为在每一次对话发起时（同样包括不清晰的查询）都会总结之前的对话摘要，llm会考虑这些上下文信息以回复当前用户查询
+        但这是一种有损压缩操作，每次llm生成清晰查询时都会删除过往对话记录，即便有对话摘要，但仍可能在多次总结过程中丢失重要信息，并且系统无法追溯原始对话
+        可选优化方案：只删除导致澄清的那一轮对话，保留之前的有效对话
+    """
     last_message = state["messages"][-1]
-    conversation_summary = state.get("conversation_summary", "")
+    conversation_summary = state.get("conversation_summary", "")        # 历史会话摘要
 
     context_section = (f"Conversation Context:\n{conversation_summary}\n" if conversation_summary.strip() else "") + f"User Query:\n{last_message.content}\n"
 
     llm_with_structure = llm.with_config(temperature=0.1).with_structured_output(QueryAnalysis)
     response = llm_with_structure.invoke([SystemMessage(content=get_rewrite_query_prompt()), HumanMessage(content=context_section)])
 
-    if response.questions and response.is_clear:
-        delete_all = [RemoveMessage(id=m.id) for m in state["messages"] if not isinstance(m, SystemMessage)]
+    if response.questions and response.is_clear:            # 不需要澄清查询
+        delete_all = [RemoveMessage(id=m.id) for m in state["messages"] if not isinstance(m, SystemMessage)]        # 欠妥--在当前设置下，小于4轮对话的记录不会被压缩；且直接删除对话记录，仅靠压缩内容回顾上下文有待商榷
         return {"questionIsClear": True, "messages": delete_all, "originalQuery": last_message.content, "rewrittenQuestions": response.questions}
 
     clarification = response.clarification_needed if response.clarification_needed and len(response.clarification_needed.strip()) > 10 else "I need more information to understand your question."
     return {"questionIsClear": False, "messages": [AIMessage(content=clarification)]}
 
 def request_clarification(state: State):
+    """请求澄清节点 - 作为中断点，等待用户提供更清晰的问题"""
+    # 此节点主要作为中断点使用，实际澄清消息已在 rewrite_query 中生成（59-60行）--用户会在中断发生之后输入澄清信息，用户消息会被追加了消息列表中，随后针对最新的这条用户消息再进行查询重写，直至不需要澄清
+    # 返回空字典表示不修改状态，仅作为流程控制标记
     return {}
 
 # --- Agent Nodes ---
@@ -54,21 +74,94 @@ def orchestrator(state: AgentState, llm_with_tools):
         [HumanMessage(content=f"[COMPRESSED CONTEXT FROM PRIOR RESEARCH]\n\n{context_summary}")]
         if context_summary else []
     )
-    if not state.get("messages"):
+
+    # 检测是否刚收到 search_child_chunks 的结果，但未调用 retrieve_parent_chunks
+    needs_parent_retrieval = False
+    parent_ids_to_retrieve = []
+
+    if state.get("messages"):
+        messages = state["messages"]
+
+        # 查找最后一条 ToolMessage
+        last_tool_msg = None
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage):
+                last_tool_msg = msg
+                break
+
+        # 查找最后一条 AIMessage 的 tool_calls
+        last_ai_msg = None
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                last_ai_msg = msg
+                break
+
+        # 如果最后一条是 ToolMessage 且来自 search_child_chunks
+        # 且最后一条 AIMessage 没有调用 retrieve_parent_chunks
+        if last_tool_msg and last_tool_msg.name == "search_child_chunks":
+            if not last_ai_msg or not any(
+                    tc.get("name") == "retrieve_parent_chunks"
+                    for tc in getattr(last_ai_msg, "tool_calls", [])
+            ):
+                # 从搜索结果中提取 Parent IDs
+                import re
+                content = last_tool_msg.content
+                if content != "NO_RELEVANT_CHUNKS":
+                    parent_ids = re.findall(r'Parent ID:\s*([^\n]+)', content)
+                    parent_ids = [pid.strip() for pid in parent_ids if pid.strip()]
+
+                    # 过滤已检索的 Parent IDs
+                    existing_parent_ids = set()
+                    if context_summary:
+                        existing_matches = re.findall(r'parent::([^\s\n]+)', context_summary)
+                        existing_parent_ids.update(existing_matches)
+
+                    # 也检查消息历史中已调用的 retrieve_parent_chunks
+                    for msg in messages:
+                        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                            for tc in msg.tool_calls:
+                                if tc["name"] == "retrieve_parent_chunks":
+                                    pid = tc["args"].get("parent_id", "")
+                                    if pid:
+                                        existing_parent_ids.add(pid)
+
+                    # parent_ids_to_retrieve = [pid for pid in parent_ids if pid not in existing_parent_ids]
+                    parent_ids_to_retrieve = list(set([pid for pid in parent_ids if pid not in existing_parent_ids]))
+                    if parent_ids_to_retrieve:
+                        needs_parent_retrieval = True
+
+    if not state.get("messages"):               # 首次执行
         human_msg = HumanMessage(content=state["question"])
-        force_search = HumanMessage(content="YOU MUST CALL 'search_child_chunks' AS THE FIRST STEP TO ANSWER THIS QUESTION.")
+        force_search = HumanMessage(content="要回答这个问题，您必须首先调用“search_child_chunks”。")
         response = llm_with_tools.invoke([sys_msg] + summary_injection + [human_msg, force_search])
         return {"messages": [human_msg, response], "tool_call_count": len(response.tool_calls or []), "iteration_count": 1}
+    # 第二次及之后执行
+    # response = llm_with_tools.invoke([sys_msg] + summary_injection + state["messages"])
+    messages_to_send = [sys_msg] + summary_injection + state["messages"]
 
-    response = llm_with_tools.invoke([sys_msg] + summary_injection + state["messages"])
+    # 如果检测到需要检索父块，添加强制指令
+    if needs_parent_retrieval:
+        force_instruction = HumanMessage(
+            content=f"【系统强制指令】检测到上一步搜索结果的 Parent ID: {', '.join(parent_ids_to_retrieve)}。\n"
+                    f"你必须立即调用 'retrieve_parent_chunks' 工具获取这些父文档的完整内容。\n"
+                    f"请对以下每个 Parent ID 调用 retrieve_parent_chunks: {', '.join(parent_ids_to_retrieve)}"
+        )
+        messages_to_send.append(force_instruction)
+
+    response = llm_with_tools.invoke(messages_to_send)
+
     tool_calls = response.tool_calls if hasattr(response, "tool_calls") else []
     return {"messages": [response], "tool_call_count": len(tool_calls) if tool_calls else 0, "iteration_count": 1}
 
 def fallback_response(state: AgentState, llm):
+    """
+    降级响应
+        通过上下文摘要和工具调用结果生成最终答案
+    """
     seen = set()
     unique_contents = []
     for m in state["messages"]:
-        if isinstance(m, ToolMessage) and m.content not in seen:
+        if isinstance(m, ToolMessage) and m.content not in seen:            # 添加通过检索工具返回的数据
             unique_contents.append(m.content)
             seen.add(m.content)
 
@@ -115,8 +208,8 @@ def should_compress_context(state: AgentState) -> Command[Literal["compress_cont
 
     updated_ids = state.get("retrieval_keys", set()) | new_ids
 
-    current_token_messages = estimate_context_tokens(messages)
-    current_token_summary = estimate_context_tokens([HumanMessage(content=state.get("context_summary", ""))])
+    current_token_messages = estimate_context_tokens(messages)                                                  # 计算当前上下文大小
+    current_token_summary = estimate_context_tokens([HumanMessage(content=state.get("context_summary", ""))])   # 计算上下文摘要的token数
     current_tokens = current_token_messages + current_token_summary
 
     max_allowed = BASE_TOKEN_THRESHOLD + int(current_token_summary * TOKEN_GROWTH_FACTOR)
@@ -125,6 +218,12 @@ def should_compress_context(state: AgentState) -> Command[Literal["compress_cont
     return Command(update={"retrieval_keys": updated_ids}, goto=goto)
 
 def compress_context(state: AgentState, llm):
+    """
+    压缩工具的调用结果
+        --根据历史摘要[用户查询+上一轮摘要+历史工具调用和执行情况]llm进行压缩
+        --压缩信息添加已执行的工具调用信息
+        --更新历史摘要并删除历史消息以压缩上下文
+    """
     messages = state["messages"]
     existing_summary = state.get("context_summary", "").strip()
 
@@ -165,7 +264,7 @@ def compress_context(state: AgentState, llm):
 
 def collect_answer(state: AgentState):
     last_message = state["messages"][-1]
-    is_valid = isinstance(last_message, AIMessage) and last_message.content and not last_message.tool_calls
+    is_valid = isinstance(last_message, AIMessage) and last_message.content and not last_message.tool_calls     # 判断是否为有效的答案[AI的最后回复+内容不为空+不存在工具调用]
     answer = last_message.content if is_valid else "Unable to generate an answer."
     return {
         "final_answer": answer,
@@ -174,6 +273,11 @@ def collect_answer(state: AgentState):
 # --- End of Agent Nodes---
 
 def aggregate_answers(state: State, llm):
+    """
+    聚合答案
+        --将所有子问题的答案通过llm进行聚合
+        --返回最终答案
+    """
     if not state.get("agent_answers"):
         return {"messages": [AIMessage(content="No answers were generated.")]}
 
