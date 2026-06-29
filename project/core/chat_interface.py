@@ -1,6 +1,6 @@
 import json
 import re
-from langchain_core.messages import HumanMessage, AIMessageChunk, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessageChunk, ToolMessage, RemoveMessage
 
 SILENT_NODES = {"rewrite_query"}                        # 静默节点：不显示最终输出
 SYSTEM_NODES = {"summarize_history", "rewrite_query"}   # 系统节点：显示在折叠框中
@@ -131,6 +131,8 @@ class ChatInterface:
             system_node_buffer = {}         # 缓冲系统节点的流式输出 {node_name: accumulated_text}
 
             for chunk, metadata in self.rag_system.agent_graph.stream(stream_input, config=config, stream_mode="messages"):     # stream_mode="messages"：以消息级别流式输出，每个 chunk 是一个消息片段
+                if isinstance(chunk, RemoveMessage):
+                    continue
                 node = metadata.get("langgraph_node", "")       # 产生当前消息片段的节点名称
 
                 # 系统节点消息
@@ -150,6 +152,34 @@ class ChatInterface:
                     self._handle_llm_token(chunk, node, response_messages)
 
                 yield response_messages
+
+            # 上下文管理指标展示（仅在存在指标数据时）
+            try:
+                final_state = self.rag_system.agent_graph.get_state(config)
+                metrics = final_state.values.get("context_metrics")
+                if metrics and hasattr(metrics, 'to_dict'):
+                    d = metrics.to_dict()
+                    if d["main"]["compressions"] > 0 or d["sub"]["compressions"] > 0:
+                        metrics_text = (
+                            f"---\n\n**上下文管理报告**\n\n"
+                            f"| 维度 | 指标 | 数值 |\n"
+                            f"|------|------|------|\n"
+                            f"| 主图 | 压缩次数 | {d['main']['compressions']} |\n"
+                            f"| 主图 | 触发原因 | {d['main']['last_trigger'] or '-'} |\n"
+                            f"| 主图 | 节省 Token | {d['main']['tokens_saved']:,} |\n"
+                            f"| 子图 | 压缩次数 | {d['sub']['compressions']} |\n"
+                            f"| 子图 | 删除 Token | {d['sub']['tokens_removed']:,} |\n"
+                            f"| 子图 | 等级分布 | {d['sub']['level_distribution']} |\n"
+                            f"| 子图 | 信息保留率 | {d['sub']['avg_info_retention']}% |\n"
+                            f"| 汇总 | 总节省 Token | {d['summary']['total_tokens_saved']:,} |\n"
+                            f"| 汇总 | 综合压缩率 | {d['summary']['compression_ratio_pct']}% |\n"
+                        )
+                        response_messages.append(
+                            make_message(metrics_text, title="📊 上下文管理报告")
+                        )
+                        yield response_messages
+            except Exception:
+                pass  # metrics 是附加信息，不影响正常流程
 
         except Exception as e:
             yield f"❌ Error: {str(e)}"

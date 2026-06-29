@@ -5,14 +5,14 @@ parent_store/
 docs/
 __pycache__/
 .vscode/
-.env
+project/.env
 .venv/
 venv/
 notebooks/
 dataset/
 README-original.md
 project/README.md
-project/evaluate_rag.py
-project/evaluate_rag_ex.py
 project/evalDir
 project/cache
+project/eval/cache
+project/eval/evalDir

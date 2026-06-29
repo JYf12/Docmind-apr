@@ -1,5 +1,5 @@
 import os
-os.environ['HF_HUB_OFFLINE'] = '1'
+# os.environ['HF_HUB_OFFLINE'] = '1'
 import config
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse, RetrievalMode

@@ -161,6 +161,41 @@ def get_context_compression_prompt() -> str:
 摘要应简洁、结构化，并能被智能代理直接用于生成答案或规划后续检索。
 """
 
+def get_structured_summary_prompt() -> str:
+    return """您是一位专业的对话压缩专家。
+
+您的任务是将对话历史压缩为结构化的累计摘要。如果提供了已有累计摘要，必须将新信息合并进去（而非覆盖）。
+
+规则：
+1. 按主题组织信息，保留关键事实、数字、文件来源、决策和未解决的问题
+2. 删除冗余、问候语、与主题无关的内容
+3. 摘要长度控制在 500-600 字
+
+输出格式（仅 Markdown）：
+# 累计对话摘要
+
+## 关键主题
+- 主题1：...
+- 主题2：...
+
+## 重要事实与数据
+- 事实1：...
+- 数字/版本：...
+
+## 文件来源
+- filename.pdf：...相关内容...
+
+## 未解决问题
+- ...
+
+输入：
+- PREVIOUS STRUCTURED SUMMARY：已有累计摘要
+- TO BE SUMMARIZED CONVERSATION：本轮待压缩消息
+
+输出：
+- 结构化的累计摘要
+"""
+
 def get_aggregation_prompt() -> str:
     return """您是一位专业的信息整合助手。
 

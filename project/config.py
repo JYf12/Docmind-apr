@@ -10,13 +10,13 @@ PARENT_STORE_PATH = os.path.join(_BASE_DIR, "parent_store")
 QDRANT_DB_PATH = os.path.join(_BASE_DIR, "qdrant_db")
 
 # --- Qdrant Configuration ---
-# CHILD_COLLECTION = "document_child_chunks"
-CHILD_COLLECTION = "document_child_chunks_javascript"
+CHILD_COLLECTION = "document_child_chunks"
+# CHILD_COLLECTION = "document_child_chunks_javascript"
 SPARSE_VECTOR_NAME = "sparse"
 
 # --- Model Configuration ---
-# DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
-DENSE_MODEL = "BAAI/bge-m3"         # Dense model
+DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
+# DENSE_MODEL = "BAAI/bge-m3"         # Dense model
 SPARSE_MODEL = "Qdrant/bm25"                                    # Sparse model
 LLM_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 LLM_TEMPERATURE = 0
@@ -25,8 +25,21 @@ LLM_TEMPERATURE = 0
 MAX_TOOL_CALLS = 8
 MAX_ITERATIONS = 5
 GRAPH_RECURSION_LIMIT = 50
-BASE_TOKEN_THRESHOLD = 2000
+BASE_TOKEN_THRESHOLD = 6000
 TOKEN_GROWTH_FACTOR = 0.9
+
+# --- Context Compression Configuration ---
+# Main graph (State) summarization triggers
+MIN_SUMMARIZE_ROUNDS = 5
+SUMMARIZE_TOKEN_THRESHOLD = 10000
+MAX_SUMMARIZE_ROUNDS = 12
+
+# Subgraph (AgentState) two-level compression (relative to max_allowed)
+COMPRESSION_LEVEL_1_RATIO = 2.5    # Level 1: delete ToolMessages only (up to 2.0x)
+# Level 2: > 2.0x → aggressive (delete all non-system, fallback)
+
+# Main graph (State) summarize_history — keep recent N messages
+KEEP_RECENT_MSG_COUNT = 6
 
 # --- Text Splitter Configuration ---
 CHILD_CHUNK_SIZE = 300                                         # 500---300---
@@ -49,7 +62,7 @@ LANGFUSE_BASE_URL = os.environ.get("LANGFUSE_BASE_URL", "http://localhost:3000")
 LLM_CONFIGS = {
     "ollama": {
         "model": "qwen2.5:7b",
-        "url": "http://localhost:11434",
+        "url": "http://192.168.3.7:11434",
         "temperature": 0
     },
     "openai": {
