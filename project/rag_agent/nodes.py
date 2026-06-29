@@ -1,61 +1,147 @@
 from typing import Literal, Set
 from langchain_core.messages import SystemMessage, HumanMessage, RemoveMessage, AIMessage, ToolMessage
 from langgraph.types import Command
-from .graph_state import State, AgentState
+from .graph_state import State, AgentState, CompressionRecord, ContextMetrics
 from .schemas import QueryAnalysis
 from .prompts_cn import *
 # from .prompts_en import *
 from utils import estimate_context_tokens
-from config import BASE_TOKEN_THRESHOLD, TOKEN_GROWTH_FACTOR
+from config import (
+    BASE_TOKEN_THRESHOLD, TOKEN_GROWTH_FACTOR,
+    MIN_SUMMARIZE_ROUNDS, SUMMARIZE_TOKEN_THRESHOLD, MAX_SUMMARIZE_ROUNDS,
+    COMPRESSION_LEVEL_1_RATIO,
+    KEEP_RECENT_MSG_COUNT,
+)
+import re
 
 def summarize_history(state: State, llm):
-    """总结历史会话[当历史会话记录大于等于4时触发]
-    keys:
-        --只筛选人类和助手的对话消息
-        --只对筛选后的消息取最近6条-----[保持系统的效率和经济性]
-        --将最相关的6条人类与AI助手的对话送给llm进行摘要总结
+    """总结历史会话[累计摘要 + 保留最近 N 条，在 aggregate_answers 之后执行]
+
+    压缩策略：
+        - 将 messages[1:-N]（跳过 SystemMessage，保留最近 N 条）压缩为累计摘要
+        - 摘要以 HumanMessage 注入，包含 [STRUCTURED CONTEXT SUMMARY] + [RECENT CONVERSATION]
+        - 删除所有非系统消息，压缩后仅剩 [Sys] + [HumanMsg(摘要+最近N条)]
+
+    triggers:
+        - token 阈值超过 SUMMARIZE_TOKEN_THRESHOLD (4000)
+        - 消息轮数超过 MAX_SUMMARIZE_ROUNDS (6)
     """
-    if len(state["messages"]) < 4:
-        return {"conversation_summary": ""}
-    
-    relevant_msgs = [
-        msg for msg in state["messages"][:-1]
-        if isinstance(msg, (HumanMessage, AIMessage)) and not getattr(msg, "tool_calls", None)
-    ]
+    messages = state["messages"]
+    print(f"主图当前消息列表:")
+    for msg in messages:
+        print(f"  - {type(msg).__name__}: {msg.content[:20]}{'...' if len(msg.content) > 20 else ''}")
+    msg_count = len(messages)
+    N = KEEP_RECENT_MSG_COUNT
 
-    if not relevant_msgs:
-        return {"conversation_summary": ""}
-    
-    conversation = "Conversation history:\n"
-    for msg in relevant_msgs[-6:]:
-        role = "User" if isinstance(msg, HumanMessage) else "Assistant"
-        conversation += f"{role}: {msg.content}\n"
+    # 不满足最低轮数时，不压缩
+    if msg_count < MIN_SUMMARIZE_ROUNDS:
+        return {}
 
-    summary_response = llm.with_config(temperature=0.2).invoke([SystemMessage(content=get_conversation_summary_prompt()), HumanMessage(content=conversation)])
-    return {"conversation_summary": summary_response.content, "agent_answers": [{"__reset__": True}]}       # {"__reset__": True}--> 清空助手的消息记录
+    # Token 估算（排除 SystemMessage）
+    non_system_msgs = [m for m in messages if not isinstance(m, SystemMessage)]
+    current_tokens = estimate_context_tokens(non_system_msgs)
+
+    # 双重触发条件
+    token_exceeded = current_tokens > SUMMARIZE_TOKEN_THRESHOLD
+    round_exceeded = msg_count >= MAX_SUMMARIZE_ROUNDS
+    if not token_exceeded and not round_exceeded:
+        print(f"History summary not triggered: token_exceeded={token_exceeded}, round_exceeded={round_exceeded}")
+        return {}
+
+    trigger = "token" if token_exceeded else "rounds"
+
+    # 边界保护：消息数太少不压缩
+    if msg_count <= N + 1:
+        return {}
+
+    # === 分离消息 ===
+    # messages[0]   = SystemMessage
+    # messages[:-N] = 待压缩的旧消息
+    # messages[-N:]  = 最近 N 条（保留原文）
+    old_messages = messages[:-N]
+    recent_msgs = messages[-N:]
+
+    # === 构建 LLM 压缩输入（支持增量合并） ===
+
+    previous_summary = state.get("structured_summary", "")
+    conversation_text = ""
+    if previous_summary.strip():
+        conversation_text += f"## [PREVIOUS STRUCTURED SUMMARY]\n{previous_summary}\n\n"
+    conversation_text += "## [TO BE SUMMARIZED CONVERSATION]\n"
+    for msg in old_messages:
+        if isinstance(msg, HumanMessage):
+            conversation_text += f"[用户]: {msg.content}\n"
+        elif isinstance(msg, AIMessage):
+            conversation_text += f"[助手]: {msg.content or '(tool call only)'}\n"
+
+    # === LLM 生成累计摘要 ===
+    summary_response = llm.with_config(temperature=0.2).invoke([
+        SystemMessage(content=get_structured_summary_prompt()),
+        HumanMessage(content=conversation_text)
+    ])
+    new_structured_summary = summary_response.content
+
+    # === 构建最近 N 条消息的原文文本 ===
+    recent_text = ""
+    for msg in recent_msgs:
+        if isinstance(msg, HumanMessage):
+            recent_text += f"[用户]: {msg.content}\n"
+        elif isinstance(msg, AIMessage):
+            recent_text += f"[助手]: {msg.content or ''}\n"
+
+    # === 注入 HumanMessage（累计摘要 + 最近 N 条原文）===
+    summary_injection = HumanMessage(
+        content=(
+            f"[STRUCTURED CONTEXT SUMMARY]\n\n{new_structured_summary}\n\n"
+            f"---\n"
+            f"[RECENT CONVERSATION]\n\n{recent_text.strip()}"
+        )
+    )
+
+    # === 删除所有非系统消息 ===
+    remove_ids = [RemoveMessage(id=m.id) for m in messages]
+    new_messages = [summary_injection] + remove_ids
+
+    # === 指标采集 ===
+    new_summary_tokens = estimate_context_tokens([summary_injection])
+    metrics: ContextMetrics = state.get("context_metrics", ContextMetrics())
+    metrics.main_compression_count += 1
+    metrics.main_tokens_before_total += current_tokens
+    metrics.main_tokens_after_total += new_summary_tokens
+    metrics.main_trigger_reason = trigger
+
+    print(f"History summary triggered by {trigger}: {new_structured_summary}--new summary tokens: {new_summary_tokens}, old tokens: {current_tokens}")
+
+    return {
+        "structured_summary": new_structured_summary,
+        "messages": new_messages,
+        "agent_answers": [{"__reset__": True}],
+        "context_metrics": metrics,
+    }
 
 def rewrite_query(state: State, llm):
     """
-    查询重写
+    查询重写（作为 START 后第一个节点）
     output:
         --问题不明确
         --一个或多个[最多三个]重写的、独立的、适用于文档检索的查询
     keys:
-        查询澄清会删除除系统消息外的所有信息，但不会完全丢失上下文，因为在每一次对话发起时（同样包括不清晰的查询）都会总结之前的对话摘要，llm会考虑这些上下文信息以回复当前用户查询
-        但这是一种有损压缩操作，每次llm生成清晰查询时都会删除过往对话记录，即便有对话摘要，但仍可能在多次总结过程中丢失重要信息，并且系统无法追溯原始对话
-        可选优化方案：只删除导致澄清的那一轮对话，保留之前的有效对话
+        - 使用 structured_summary 作为对话上下文
     """
     last_message = state["messages"][-1]
-    conversation_summary = state.get("conversation_summary", "")        # 历史会话摘要
+    structured_summary = state.get("structured_summary", "")
 
-    context_section = (f"Conversation Context:\n{conversation_summary}\n" if conversation_summary.strip() else "") + f"User Query:\n{last_message.content}\n"
+    # 上下文 = 累计摘要 + 当前查询
+    context_section = ""
+    if structured_summary.strip():
+        context_section += f"## [Conversation Context]\n{structured_summary}\n\n"
+    context_section += f"## [User Query]\n{last_message.content}\n"
 
     llm_with_structure = llm.with_config(temperature=0.1).with_structured_output(QueryAnalysis)
     response = llm_with_structure.invoke([SystemMessage(content=get_rewrite_query_prompt()), HumanMessage(content=context_section)])
 
-    if response.questions and response.is_clear:            # 不需要澄清查询
-        delete_all = [RemoveMessage(id=m.id) for m in state["messages"] if not isinstance(m, SystemMessage)]        # 欠妥--在当前设置下，小于4轮对话的记录不会被压缩；且直接删除对话记录，仅靠压缩内容回顾上下文有待商榷
-        return {"questionIsClear": True, "messages": delete_all, "originalQuery": last_message.content, "rewrittenQuestions": response.questions}
+    if response.questions and response.is_clear:
+        return {"questionIsClear": True, "originalQuery": last_message.content, "rewrittenQuestions": response.questions}
 
     clarification = response.clarification_needed if response.clarification_needed and len(response.clarification_needed.strip()) > 10 else "I need more information to understand your question."
     return {"questionIsClear": False, "messages": [AIMessage(content=clarification)]}
@@ -186,6 +272,36 @@ def fallback_response(state: AgentState, llm):
     response = llm.invoke([SystemMessage(content=get_fallback_response_prompt()), HumanMessage(content=prompt_content)])
     return {"messages": [response]}
 
+# ===== 关键信息兜底工具函数 =====
+
+def extract_file_sources(messages: list) -> set:
+    """从消息中提取所有文件来源名"""
+    sources = set()
+    for msg in messages:
+        if isinstance(msg, (AIMessage, ToolMessage)) and msg.content:
+            content = str(msg.content)
+            # 匹配文件名（xxx.pdf, xxx.md, xxx.docx 等）— 使用 ASCII 字符集避免匹配中文
+            files = re.findall(r'[a-zA-Z0-9_\-]+\.(?:pdf|md|docx|txt)', content)
+            sources.update(files)
+            # 匹配中文引导的来源
+            cn_files = re.findall(r'(?:来源|来自|文件)[：:]*\s*(\S+\.\w+)', content)
+            sources.update(cn_files)
+    return sources
+
+
+def verify_and_patch_summary(summary: str, critical_sources: set) -> tuple[str, int]:
+    """检查关键来源是否已保留，返回(补丁后的摘要, 保留数)"""
+    if not critical_sources:
+        return summary, 0
+    missing = [s for s in critical_sources if s not in summary]
+    if not missing:
+        return summary, len(critical_sources)
+    preserved = len(critical_sources) - len(missing)
+    summary += f"\n\n## 保留数据\n"
+    summary += "\n".join(f"- 来源文件: {s}" for s in sorted(missing))
+    return summary, preserved
+
+
 def should_compress_context(state: AgentState) -> Command[Literal["compress_context", "orchestrator"]]:
     messages = state["messages"]
 
@@ -208,27 +324,48 @@ def should_compress_context(state: AgentState) -> Command[Literal["compress_cont
 
     updated_ids = state.get("retrieval_keys", set()) | new_ids
 
-    current_token_messages = estimate_context_tokens(messages)                                                  # 计算当前上下文大小
-    current_token_summary = estimate_context_tokens([HumanMessage(content=state.get("context_summary", ""))])   # 计算上下文摘要的token数
+    current_token_messages = estimate_context_tokens(messages)
+    current_token_summary = estimate_context_tokens([HumanMessage(content=state.get("context_summary", ""))])
     current_tokens = current_token_messages + current_token_summary
 
     max_allowed = BASE_TOKEN_THRESHOLD + int(current_token_summary * TOKEN_GROWTH_FACTOR)
+    ratio = current_tokens / max_allowed if max_allowed > 0 else 1.0
 
-    goto = "compress_context" if current_tokens > max_allowed else "orchestrator"
-    return Command(update={"retrieval_keys": updated_ids}, goto=goto)
+    if ratio <= 1.0:
+        print(f"Context within token limit, no compression needed. Ratio: {ratio:.2f}--Current tokens: {current_tokens}, Max allowed: {max_allowed}")
+        return Command(update={"retrieval_keys": updated_ids}, goto="orchestrator")
+
+    # 两级压缩等级判定
+    # Level 1: 仅删 ToolMessage（占比 ~90%），保留推理链
+    # Level 2: 激进删除所有非 System 消息（极端情况兜底）
+    level = 1 if ratio <= COMPRESSION_LEVEL_1_RATIO else 2.5
+
+    return Command(
+        update={
+            "compression_level": level,
+            "trigger_ratio": ratio,
+            "retrieval_keys": updated_ids,
+        },
+        goto="compress_context"
+    )
+
 
 def compress_context(state: AgentState, llm):
     """
-    压缩工具的调用结果
+    分层渐进式压缩 + 关键信息兜底
         --根据历史摘要[用户查询+上一轮摘要+历史工具调用和执行情况]llm进行压缩
-        --压缩信息添加已执行的工具调用信息
-        --更新历史摘要并删除历史消息以压缩上下文
+        --按压缩等级决定删除哪些消息（轻度/中度/激进）
+        --自动验证压缩后文件来源是否保留，缺失则追加
     """
     messages = state["messages"]
     existing_summary = state.get("context_summary", "").strip()
+    level = state.get("compression_level", 2)
 
     if not messages:
         return {}
+
+    # [兜底] 压缩前提取关键数据点
+    sources_before = extract_file_sources(messages)
 
     conversation_text = f"USER QUESTION:\n{state.get('question')}\n\nConversation to compress:\n\n"
     if existing_summary:
@@ -245,9 +382,17 @@ def compress_context(state: AgentState, llm):
             tool_name = getattr(msg, "name", "tool")
             conversation_text += f"[TOOL RESULT — {tool_name}]\n{msg.content}\n\n"
 
-    summary_response = llm.invoke([SystemMessage(content=get_context_compression_prompt()), HumanMessage(content=conversation_text)])
+    tokens_before = estimate_context_tokens(messages[1:])
+    summary_response = llm.invoke([
+        SystemMessage(content=get_context_compression_prompt()),
+        HumanMessage(content=conversation_text)
+    ])
     new_summary = summary_response.content
 
+    # [兜底] 验证关键来源是否保留
+    patched_summary, sources_preserved = verify_and_patch_summary(new_summary, sources_before)
+
+    # 追加已执行信息
     retrieved_ids: Set[str] = state.get("retrieval_keys", set())
     if retrieved_ids:
         parent_ids = sorted(r for r in retrieved_ids if r.startswith("parent::"))
@@ -258,17 +403,86 @@ def compress_context(state: AgentState, llm):
             block += "Parent chunks retrieved:\n" + "\n".join(f"- {p.replace('parent::', '')}" for p in parent_ids) + "\n"
         if search_queries:
             block += "Search queries already run:\n" + "\n".join(f"- {q}" for q in search_queries) + "\n"
-        new_summary += block
+        patched_summary += block
 
-    return {"context_summary": new_summary, "messages": [RemoveMessage(id=m.id) for m in messages[1:]]}
+    final_summary = patched_summary
+
+    # 按等级决定删除哪些消息
+    if level == 1:
+        # Level 1: 仅删除 ToolMessage（占比 ~90%），保留推理链完整
+        messages_to_remove = [
+            RemoveMessage(id=m.id) for m in messages[1:]
+            if isinstance(m, ToolMessage) or (isinstance(m, AIMessage) and getattr(m, "tool_calls", None))
+        ]
+    else:
+        # Level 2: 删除所有非 System 消息（极端情况兜底）
+        messages_to_remove = [RemoveMessage(id=m.id) for m in messages[1:]]
+
+    tokens_after = estimate_context_tokens([HumanMessage(content=final_summary)])
+    tokens_removed = tokens_before - tokens_after
+
+    print(f"Compression level {level}: {tokens_removed} tokens removed ({tokens_before} -> {tokens_after})")
+
+    # 采集子图指标
+    record = CompressionRecord(
+        level=level,
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        tokens_removed=tokens_removed,
+        sources_before=len(sources_before),
+        sources_preserved=sources_preserved,
+        ratio=state.get("trigger_ratio", 0.0),
+        summary_length=len(final_summary),
+    )
+
+    metrics: ContextMetrics = state.get("sub_context_metrics", ContextMetrics())
+    metrics.sub_compression_records.append(record)
+    metrics.sub_total_compressions += 1
+    metrics.sub_total_tokens_removed += tokens_removed
+    metrics.sub_level_counts[level - 1] += 1
+
+    return {
+        "context_summary": final_summary,
+        "messages": messages_to_remove,
+        "sub_context_metrics": metrics,
+    }
 
 def collect_answer(state: AgentState):
     last_message = state["messages"][-1]
-    is_valid = isinstance(last_message, AIMessage) and last_message.content and not last_message.tool_calls     # 判断是否为有效的答案[AI的最后回复+内容不为空+不存在工具调用]
+    is_valid = isinstance(last_message, AIMessage) and last_message.content and not last_message.tool_calls
     answer = last_message.content if is_valid else "Unable to generate an answer."
+
+    # === 1. 先提取检索上下文（在删除消息前完成） ===
+    contexts = []
+    seen = set()
+    for msg in state["messages"]:
+        if isinstance(msg, ToolMessage) and msg.content not in seen:
+            if not any(kw in msg.content for kw in [
+                "NO_RELEVANT_CHUNKS", "NO_PARENT_DOCUMENTS",
+                "NO_PARENT_DOCUMENT", "RETRIEVAL_ERROR", "PARENT_RETRIEVAL_ERROR"
+            ]):
+                contexts.append(msg.content)
+                seen.add(msg.content)
+
+    # === 2. 清除子图所有消息，阻止 ToolMessage 回流污染主图 ==
+    remove_all = [RemoveMessage(id=m.id) for m in state["messages"]]
+
+    # 捎带子图指标到主图的 agent_answers 中（通过 accumulate_or_reset reducer 累积）
+    extra = {}
+    sub_metrics = state.get("sub_context_metrics")
+    if sub_metrics and hasattr(sub_metrics, 'to_dict'):
+        extra["context_metrics"] = sub_metrics.to_dict()
+
     return {
         "final_answer": answer,
-        "agent_answers": [{"index": state["question_index"], "question": state["question"], "answer": answer}]
+        "messages": remove_all,
+        "agent_answers": [{
+            "index": state["question_index"],
+            "question": state["question"],
+            "answer": answer,
+            "contexts": contexts,       # ← 检索内容走 agent_answers 通道，供评测读取
+            **extra,
+        }]
     }
 # --- End of Agent Nodes---
 
@@ -289,4 +503,26 @@ def aggregate_answers(state: State, llm):
 
     user_message = HumanMessage(content=f"""Original user question: {state["originalQuery"]}\nRetrieved answers:{formatted_answers}""")
     synthesis_response = llm.invoke([SystemMessage(content=get_aggregation_prompt()), user_message])
-    return {"messages": [AIMessage(content=synthesis_response.content)]}
+
+    # 合并各子图的 metrics 到主图
+    merged = None
+    main_metrics: ContextMetrics = state.get("context_metrics", ContextMetrics())
+    for ans in sorted_answers:
+        sub_data = ans.get("context_metrics")
+        if sub_data and isinstance(sub_data, dict):
+            if merged is None:
+                # 转换 dict 回 ContextMetrics
+                merged = ContextMetrics()
+            sub_data = sub_data.get("sub", {})
+            merged.sub_total_compressions += sub_data.get("compressions", 0)
+            merged.sub_total_tokens_removed += sub_data.get("tokens_removed", 0)
+
+    if merged:
+        main_metrics.sub_total_compressions += merged.sub_total_compressions
+        main_metrics.sub_total_tokens_removed += merged.sub_total_tokens_removed
+        main_metrics.sub_level_counts = [
+            main_metrics.sub_level_counts[i] + merged.sub_level_counts[i]
+            for i in range(3)
+        ]
+
+    return {"messages": [AIMessage(content=synthesis_response.content)], "context_metrics": main_metrics}
