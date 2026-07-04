@@ -15,8 +15,8 @@ CHILD_COLLECTION = "document_child_chunks"
 SPARSE_VECTOR_NAME = "sparse"
 
 # --- Model Configuration ---
-DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
-# DENSE_MODEL = "BAAI/bge-m3"         # Dense model
+# DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
+DENSE_MODEL = "BAAI/bge-m3"         # Dense model
 SPARSE_MODEL = "Qdrant/bm25"                                    # Sparse model
 LLM_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 LLM_TEMPERATURE = 0
@@ -43,7 +43,7 @@ KEEP_RECENT_MSG_COUNT = 6
 
 # --- Text Splitter Configuration ---
 CHILD_CHUNK_SIZE = 300                                         # 500---300---
-CHILD_CHUNK_OVERLAP = 100                                      # 100---50---
+CHILD_CHUNK_OVERLAP = 150                                      # 100---50---
 MIN_PARENT_SIZE = 1500                                         # 2000---1500---
 MAX_PARENT_SIZE = 3000                                         # 4000---3000---
 HEADERS_TO_SPLIT_ON = [
