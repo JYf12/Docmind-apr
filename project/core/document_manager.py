@@ -1,7 +1,7 @@
 from pathlib import Path
 import shutil
 import config
-from utils import pdfs_to_markdowns, clear_directory_contents
+from utils import clear_directory_contents, convert_to_markdown
 
 class DocumentManager:
 
@@ -22,7 +22,7 @@ class DocumentManager:
             return 0, 0
             
         document_paths = [document_paths] if isinstance(document_paths, str) else document_paths
-        document_paths = [p for p in document_paths if p and Path(p).suffix.lower() in [".pdf", ".md"]]     # 过滤不是Markdown或PDF的文件
+        document_paths = [p for p in document_paths if p and Path(p).suffix.lower() in [".pdf", ".md", ".docx", ".pptx", ".xlsx", ".xls", ".html", ".htm", ".epub", ".csv", ".json", ".xml"]]     # 过滤不支持的文件格式
         
         if not document_paths:
             return 0, 0
@@ -41,11 +41,11 @@ class DocumentManager:
                 skipped += 1
                 continue
                 
-            try:            
+            try:
                 if Path(doc_path).suffix.lower() == ".md":      # 如果是Markdown文件，则直接复制以进行分块
                     shutil.copy(doc_path, md_path)
                 else:
-                    pdfs_to_markdowns(str(doc_path), overwrite=False)          # 不是Markdown文件则将PDF转换为Markdown
+                    convert_to_markdown(doc_path, self.markdown_dir)          # 其他格式统一通过解析器转换为Markdown
                 parent_chunks, child_chunks = self.rag_system.chunker.create_chunks_single(md_path)         # 分层分块实现
                 
                 if not child_chunks:

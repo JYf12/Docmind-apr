@@ -6,6 +6,7 @@ import pymupdf4llm
 from pathlib import Path
 import glob
 import tiktoken
+from parsers import get_parser_for_file
 
 
 def clear_directory_contents(directory: Path) -> None:
@@ -38,6 +39,27 @@ def pdfs_to_markdowns(path_pattern, overwrite: bool = False):
         md_path = (output_dir / pdf_path.stem).with_suffix(".md")
         if overwrite or not md_path.exists():
             pdf_to_markdown(pdf_path, output_dir)
+
+def convert_to_markdown(file_path, output_dir):
+    """通用文档转 Markdown，根据文件类型和 config.PDF_PARSER 自动选择解析器。
+
+    - PDF 文件：由 config.PDF_PARSER 决定使用 pymupdf4llm 还是 markitdown
+    - 其他格式（docx/pptx/xlsx 等）：统一使用 markitdown
+
+    Args:
+        file_path: 输入文件路径
+        output_dir: 输出目录
+
+    Returns:
+        生成的 .md 文件路径
+
+    Raises:
+        ValueError: 文件格式不被任何解析器支持
+    """
+    parser = get_parser_for_file(file_path)
+    if parser is None:
+        raise ValueError(f"Unsupported file format: {file_path}")
+    return parser.convert(file_path, output_dir)
 
 def estimate_context_tokens(messages: list) -> int:
     """计算token数"""

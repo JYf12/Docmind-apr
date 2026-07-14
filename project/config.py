@@ -15,8 +15,8 @@ CHILD_COLLECTION = "document_child_chunks"
 SPARSE_VECTOR_NAME = "sparse"
 
 # --- Model Configuration ---
-# DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
-DENSE_MODEL = "BAAI/bge-m3"         # Dense model
+DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
+# DENSE_MODEL = "BAAI/bge-m3"         # Dense model
 SPARSE_MODEL = "Qdrant/bm25"                                    # Sparse model
 LLM_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 LLM_TEMPERATURE = 0
@@ -41,6 +41,10 @@ COMPRESSION_LEVEL_1_RATIO = 2.5    # Level 1: delete ToolMessages only (up to 2.
 # Main graph (State) summarize_history — keep recent N messages
 KEEP_RECENT_MSG_COUNT = 6
 
+# --- Document Parser Configuration ---
+# PDF parser: "pymupdf4llm" (current default) or "markitdown" (for comparison testing)
+PDF_PARSER = "pymupdf4llm"
+
 # --- Text Splitter Configuration ---
 CHILD_CHUNK_SIZE = 300                                         # 500---300---
 CHILD_CHUNK_OVERLAP = 150                                      # 100---50---
@@ -62,7 +66,7 @@ LANGFUSE_BASE_URL = os.environ.get("LANGFUSE_BASE_URL", "http://localhost:3000")
 LLM_CONFIGS = {
     "ollama": {
         "model": "qwen2.5:7b",
-        "url": "http://192.168.3.7:11434",
+        "url": "http://192.168.3.9:11434",
         "temperature": 0
     },
     "openai": {
