@@ -9,6 +9,7 @@ from pathlib import Path
 import pymupdf
 import pymupdf4llm
 
+import config
 from parsers.base import BaseParser
 
 
@@ -40,7 +41,7 @@ class PymupdfParser(BaseParser):
             page_separators=True,  # PDF 中图片如果带有 OCR 文本层（如扫描件），pymupdf4llm 会提取这些文字
             ignore_images=False,    # 设置 write_images=True + image_path，将 PDF 中的图片导出为 png/jpg 文件，并在 Markdown 中插入 ![](path) 引用
             write_images=True,
-            image_path="images",
+            image_path=config.MARKDOWN_IMAGES_DIR,
             # table_strategy="lines",     # 显式指定表格检测策略
             # margins=(0, 0, 0, 0)  # 保留边缘表格
         )

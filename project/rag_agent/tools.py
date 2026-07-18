@@ -6,10 +6,11 @@ from flashrank import Ranker, RerankRequest   # 新增              flashrank:�
 from langchain_core.documents import Document  # 新增
 
 class ToolFactory:
-    
-    def __init__(self, collection):
+
+    def __init__(self, collection, image_store_manager=None):
         self.collection = collection
         self.parent_store_manager = ParentStoreManager()
+        self.image_store_manager = image_store_manager
 
         # ================== 新增：初始化 Reranker ==================
         self.reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./cache")  # 轻量版
@@ -40,12 +41,21 @@ class ToolFactory:
             # Step 3: 执行 Rerank（关键）
             reranked_docs = self._rerank_documents(query, docs, top_n=5)
 
-            return "\n\n".join([
-                f"Parent ID: {doc.metadata.get('parent_id', '')}\n"
-                f"File Name: {doc.metadata.get('source', '')}\n"
-                f"Content: {doc.page_content.strip()}"
-                for doc in reranked_docs
-            ])            
+            formatted = []
+            for doc in reranked_docs:
+                if doc.metadata.get('is_image_summary'):
+                    formatted.append(
+                        f"Image ID: {doc.metadata.get('image_id', '')}\n"
+                        f"File Name: {doc.metadata.get('source', '')}\n"
+                        f"Content:\n {doc.page_content.strip()}"
+                    )
+                else:
+                    formatted.append(
+                        f"Parent ID: {doc.metadata.get('parent_id', '')}\n"
+                        f"File Name: {doc.metadata.get('source', '')}\n"
+                        f"Content:\n {doc.page_content.strip()}"
+                    )
+            return "\n\n".join(formatted)            
 
         except Exception as e:
             return f"RETRIEVAL_ERROR: {str(e)}"
@@ -96,7 +106,7 @@ class ToolFactory:
     
     def _retrieve_parent_chunks(self, parent_id: str) -> str:                       # 单个父块内容召回 根据单个parent_id召回单个父块内容
         """Retrieve full parent chunks by their IDs.
-    
+
         Args:
             parent_id: Parent chunk ID to retrieve
         """
@@ -109,14 +119,44 @@ class ToolFactory:
                 f"Parent ID: {parent.get('parent_id', 'n/a')}\n"
                 f"File Name: {parent.get('metadata', {}).get('source', 'unknown')}\n"
                 f"Content: {parent.get('content', '').strip()}"
-            )          
+            )
 
         except Exception as e:
             return f"PARENT_RETRIEVAL_ERROR: {str(e)}"
-    
+
+    def _retrieve_images(self, image_ids) -> str:
+        """Retrieve image metadata by one or more image IDs for visual analysis.
+
+        Call this when search_child_chunks returns image-summary chunks (identified
+        by an 'Image ID:' field). The result includes image path, description and
+        source file so a multimodal LLM can later view the actual image.
+
+        Args:
+            image_ids: A single image ID string, or a list of image ID strings, to retrieve
+        """
+        if self.image_store_manager is None:
+            return "IMAGE_STORE_NOT_AVAILABLE"
+
+        try:
+            ids = [image_ids] if isinstance(image_ids, str) else list(image_ids)
+            images = self.image_store_manager.load_many(ids)
+            if not images:
+                return "NO_IMAGE_METADATA_FOUND"
+
+            return "\n\n".join([
+                f"Image ID: {img.get('image_id', 'n/a')}\n"
+                f"Source File: {img.get('source_file', 'unknown')}\n"
+                f"Description: {img.get('description', '')}\n"
+                f"Image Path: {img.get('image_path', '')}"
+                for img in images
+            ])
+        except Exception as e:
+            return f"IMAGE_RETRIEVAL_ERROR: {str(e)}"
+
     def create_tools(self) -> List:
         """Create and return the list of tools."""
         search_tool = tool("search_child_chunks")(self._search_child_chunks)                # 搜索工具---子块相似度检索
         retrieve_tool = tool("retrieve_parent_chunks")(self._retrieve_parent_chunks)        # 召回工具---单个父块内容召回
-        
-        return [search_tool, retrieve_tool]         # 返回工具列表[搜索工具+召回工具]
+        image_tool = tool("retrieve_images")(self._retrieve_images)                          # 图片工具---图片元数据召回
+
+        return [search_tool, retrieve_tool, image_tool]         # 返回工具列表[搜索工具+召回工具+图片工具]

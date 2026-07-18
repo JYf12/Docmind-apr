@@ -7,7 +7,7 @@ from .graph_state import State
 from .nodes import *
 from .edges import *
 
-def create_agent_graph(llm, tools_list):
+def create_agent_graph(llm, tools_list, multimodal_llm=None):
     llm_with_tools = llm.bind_tools(tools_list)
     tool_node = ToolNode(tools_list)
 
@@ -38,7 +38,7 @@ def create_agent_graph(llm, tools_list):
     graph_builder.add_node("rewrite_query", partial(rewrite_query, llm=llm))                        # 查询重写器[将用户输入进行重写【将用户输入进行重写，以适应AI的输入格式】]
     graph_builder.add_node(request_clarification)                                                   # 请求澄清器[当查询无法得到有效答案时，请求澄清]
     graph_builder.add_node("agent", agent_subgraph)                                                 # 问答子图[处理单个查询的完整生命周期]--对每个重写的子问题并行执行智能代理流程
-    graph_builder.add_node("aggregate_answers", partial(aggregate_answers, llm=llm))                # 聚合答案器[将多个子问题的答案聚合为最终答案]
+    graph_builder.add_node("aggregate_answers", partial(aggregate_answers, llm=llm, multimodal_llm=multimodal_llm))  # 聚合答案器[将多个子问题的答案聚合为最终答案，支持多模态]
 
     graph_builder.add_edge(START, "rewrite_query")                                                  # START → rewrite_query（rewrite_query 可直接获取 messages[-1] 作为当前查询）
     graph_builder.add_conditional_edges("rewrite_query", route_after_rewrite)                       # 触发路由判断：问题清晰->agent | 否则->request_clarification

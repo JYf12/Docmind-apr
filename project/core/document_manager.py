@@ -55,7 +55,13 @@ class DocumentManager:
                 collection = self.rag_system.vector_db.get_collection(self.rag_system.collection_name)      # 获取向量数据库
                 collection.add_documents(child_chunks)                                                      # 向量数据库中添加子块
                 self.rag_system.parent_store.save_many(parent_chunks)                                       # 父块以json格式保存到本地
-                
+
+                # 图片 Summary 生成 & 索引（与文本子块同集合）
+                if config.IMAGE_SUMMARY_ENABLED and self.rag_system.image_summary_generator:
+                    image_summary_docs = self.rag_system.image_summary_generator.create_summary_chunks(md_path)
+                    if image_summary_docs:
+                        collection.add_documents(image_summary_docs)
+
                 added += 1
                 
             except Exception as e:
@@ -73,7 +79,13 @@ class DocumentManager:
     def clear_all(self):
         self.markdown_dir.mkdir(parents=True, exist_ok=True)
         clear_directory_contents(self.markdown_dir)             # 清空markdown文件目录
-        
+
+        # 清空 pymupdf4llm 提取的图片目录
+        images_dir = Path(config.MARKDOWN_IMAGES_DIR)
+        if images_dir.exists():
+            clear_directory_contents(images_dir)
+
         self.rag_system.parent_store.clear_store()              # 删除父块存储json文件
+        self.rag_system.image_store_manager.clear_store()       # 删除图片元数据存储
         self.rag_system.vector_db.delete_collection(self.rag_system.collection_name)       # 删除Qdrant向量存储集合
         self.rag_system.vector_db.create_collection(self.rag_system.collection_name)       # 重新创建向量数据库空集合
