@@ -6,6 +6,7 @@ import os
 _BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 MARKDOWN_DIR = os.path.join(_BASE_DIR, "markdown_docs")
+MARKDOWN_IMAGES_DIR = os.path.join(_BASE_DIR, "markdown_docs", "images")  # pymupdf4llm 提取的图片目录
 PARENT_STORE_PATH = os.path.join(_BASE_DIR, "parent_store")
 QDRANT_DB_PATH = os.path.join(_BASE_DIR, "qdrant_db")
 
@@ -15,8 +16,8 @@ CHILD_COLLECTION = "document_child_chunks"
 SPARSE_VECTOR_NAME = "sparse"
 
 # --- Model Configuration ---
-DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
-# DENSE_MODEL = "BAAI/bge-m3"         # Dense model
+# DENSE_MODEL = "sentence-transformers/all-mpnet-base-v2"         # Dense model
+DENSE_MODEL = "BAAI/bge-m3"         # Dense model
 SPARSE_MODEL = "Qdrant/bm25"                                    # Sparse model
 LLM_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 LLM_TEMPERATURE = 0
@@ -45,11 +46,26 @@ KEEP_RECENT_MSG_COUNT = 6
 # PDF parser: "pymupdf4llm" (current default) or "markitdown" (for comparison testing)
 PDF_PARSER = "pymupdf4llm"
 
+# --- Image & Multimodal Configuration ---
+IMAGE_STORE_PATH = os.path.join(_BASE_DIR, "image_store")       # 图片元数据 JSON 存储
+IMAGE_SUMMARY_ENABLED = True                                    # 是否启用图片 Summary 生成  Falsw-索引时不生成图片 Summary，系统行为与原纯文本方案完全一致
+MAX_IMAGES_PER_ANSWER = 7                                       # 注入 aggregate_answers 的图片上限
+
+# VLM for generating image summaries at index time (lightweight) — provider override table
+# Falls back to LLM_CONFIGS[ACTIVE_LLM_CONFIG] if IMAGE_SUMMARY_PROVIDER is "".
+IMAGE_SUMMARY_PROVIDER = "qwen"                                     # 留空则复用 ACTIVE_LLM_CONFIG
+IMAGE_SUMMARY_MODEL = "qwen3.7-plus"                             # 建议轻量多模态模型
+
+# Multimodal LLM for final answer synthesis — provider override table
+# Falls back to the active text LLM if MULTIMODAL_LLM_PROVIDER is "" (纯文本降级).
+MULTIMODAL_LLM_PROVIDER = "qwen"                                    # 留空则复用 ACTIVE_LLM_CONFIG
+MULTIMODAL_LLM_MODEL = "qwen3.7-plus"                                 # 最终答案生成的多模态模型
+
 # --- Text Splitter Configuration ---
-CHILD_CHUNK_SIZE = 300                                         # 500---300---
-CHILD_CHUNK_OVERLAP = 150                                      # 100---50---
-MIN_PARENT_SIZE = 1500                                         # 2000---1500---
-MAX_PARENT_SIZE = 3000                                         # 4000---3000---
+CHILD_CHUNK_SIZE = 600                                         # 500---300---
+CHILD_CHUNK_OVERLAP = 50                                      # 100---50---
+MIN_PARENT_SIZE = 2000                                         # 2000---1500---
+MAX_PARENT_SIZE = 4000                                         # 4000---3000---
 HEADERS_TO_SPLIT_ON = [
     ("#", "H1"),
     ("##", "H2"),
@@ -80,6 +96,12 @@ LLM_CONFIGS = {
     },
     "google": {
         "model": "gemini-2.5-flash",
+        "temperature": 0
+    },
+    "qwen": {
+        "model": "qwen3.7-plus",
+        "api_key": os.environ.get("DASHSCOPE_API_KEY", ""),
+        "base_url": "https://llm-tvln9gdj09ezs2ad.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
         "temperature": 0
     }
 }
